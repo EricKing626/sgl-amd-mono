@@ -310,12 +310,52 @@ def test_config_reasons_name_each_mismatch():
     assert "RoPE 'yarn'" in text
 
 
+MXFP4 = {"dtype": "fp4", "group_size": 32, "scale_format": "e8m0"}
+
+
+def test_glm52s_quark_mxfp4_checkpoint_is_served():
+    quark = {
+        "quant_method": "quark",
+        "global_quant_config": {"weight": MXFP4, "input_tensors": MXFP4},
+        "layer_quant_config": {},
+    }
+    glm52 = SimpleNamespace(**{**vars(GLM53), "quantization_config": quark})
+    assert glm53._config_disable_reasons(CFG, glm52) == []
+    fp8_inputs = {**MXFP4, "dtype": "fp8_e4m3"}
+    other = {
+        **quark,
+        "global_quant_config": {"weight": MXFP4, "input_tensors": fp8_inputs},
+    }
+    glm52 = SimpleNamespace(**{**vars(GLM53), "quantization_config": other})
+    assert "Quark MXFP4" in " ".join(glm53._config_disable_reasons(CFG, glm52))
+
+
+def _mxfp4_moe(shuffled=True, scale_dims=3):
+    w13 = torch.empty(257, 4, 8, dtype=torch.uint8)
+    if shuffled:
+        w13.is_shuffled = True
+    scale = torch.empty((257, 4, 1)[3 - scale_dims :], dtype=torch.uint8)
+    return SimpleNamespace(
+        experts=SimpleNamespace(w13_weight=w13, w13_weight_scale=scale)
+    )
+
+
+def test_mxfp4_experts_are_read_only_in_aiters_a4w4_layout():
+    from sgl_amd_mono.glm53.gfx950.weights import experts_reason, is_mxfp4_experts
+
+    assert is_mxfp4_experts(_mxfp4_moe())
+    assert experts_reason(_mxfp4_moe()) is None
+    assert "shuffled" in experts_reason(_mxfp4_moe(shuffled=False))
+    assert "GU-interleaved" in experts_reason(_mxfp4_moe(scale_dims=2))
+
+
 def _linear(shuffled=True):
     # SGLang marks only the block-FP8 linears it rewrote into AITER's layout
     if not shuffled:
-        return SimpleNamespace(weight=SimpleNamespace())
+        return SimpleNamespace(weight=SimpleNamespace(dtype=torch.float8_e4m3fn))
     return SimpleNamespace(
-        aiter_bpreshuffled=True, weight=SimpleNamespace(is_shuffled=True)
+        aiter_bpreshuffled=True,
+        weight=SimpleNamespace(is_shuffled=True, dtype=torch.float8_e4m3fn),
     )
 
 
@@ -417,11 +457,11 @@ def test_model_reasons(tp8):
     good = _layers()
     assert glm53._model_disable_reasons(_model(good), GLM53, {}) == []
     bad = list(good)
-    bad[5] = _layer(experts_dtype=torch.bfloat16)
+    bad[5] = _layer(experts_dtype=torch.float16)
     bad[9] = _layer(n_experts=256)
     bad[0] = _dense_layer(indexer=False)
     reasons = " | ".join(glm53._model_disable_reasons(_model(bad), GLM53, {}))
-    assert "layer 5: needs block-FP8 experts" in reasons
+    assert "layer 5: needs block-FP8, MXFP4 or bf16 experts" in reasons
     assert "layer 9: needs the shared expert fused" in reasons
     # layer 0 runs the indexer: the MoE layers before the first indexer one read its
     # top-k (and layers 1 and 2 recompute it)
@@ -439,8 +479,8 @@ def test_model_reasons_of_the_tail_the_embedding_and_the_dense_layers(tp8, monke
     monkeypatch.setattr(tp8, "head_weights", refuse("an fp8 LM head"))
     monkeypatch.setattr(tp8, "embedding", refuse("padded rows"))
     layers = _layers()
-    # a bf16 dense MLP; 1,600 intermediates a rank, not slices of the experts' 256
-    layers[1] = _dense_layer(dtype=torch.bfloat16)
+    # an fp16 dense MLP; 1,600 intermediates a rank, not slices of the experts' 256
+    layers[1] = _dense_layer(dtype=torch.float16)
     layers[2] = _dense_layer(inter=1600)
     lp = _lp(
         use_attn_tp_group=True,
