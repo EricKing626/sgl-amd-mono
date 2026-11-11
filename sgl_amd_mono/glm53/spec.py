@@ -247,13 +247,12 @@ def _is_quark_mxfp4(quant: dict) -> bool:
     scale per 32), every other linear bf16 (copied as block FP8 at build)."""
     if quant.get("quant_method") != "quark":
         return False
-    glob = quant.get("global_quant_config") or {}
-    return all(
-        (glob.get(t) or {}).get("dtype") == "fp4"
-        and (glob.get(t) or {}).get("group_size") == 32
-        and (glob.get(t) or {}).get("scale_format") == "e8m0"
-        for t in ("weight", "input_tensors")
-    ) and not (quant.get("layer_quant_config") or quant.get("layer_type_quant_config"))
+    glob, mxfp4 = quant.get("global_quant_config") or {}, ("fp4", 32, "e8m0")
+    for t in ("weight", "input_tensors"):
+        q = glob.get(t) or {}
+        if (q.get("dtype"), q.get("group_size"), q.get("scale_format")) != mxfp4:
+            return False
+    return not (quant.get("layer_quant_config") or quant.get("layer_type_quant_config"))
 
 
 def _config_disable_reasons(cfg, hf_config) -> list[str]:

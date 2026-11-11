@@ -143,7 +143,8 @@ def _block_quant(w: torch.Tensor, br: int = 128, bc: int = 128):
     x[..., :rows, :cols] = w.float()
     blocks = x.view(*lead, pr // br, br, pc // bc, bc)
     n = len(lead)
-    scale = blocks.abs().amax(dim=(n + 1, n + 3), keepdim=True).clamp(min=1e-12) / 448
+    amax = blocks.abs().amax(dim=(n + 1, n + 3), keepdim=True)
+    scale = amax.clamp_(min=torch.finfo(torch.float32).tiny) / 448
     q = (blocks / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
     q = q.view(*lead, pr, pc)[..., :rows, :cols].contiguous()
     return q, scale.view(*lead, pr // br, pc // bc).contiguous()
@@ -172,7 +173,7 @@ def _bf16_experts_shuffled(experts) -> bool:
     )
 
 
-def _experts_as_fp8(name: str, w: torch.Tensor, shuffled: bool, idx, copies: dict):
+def _experts_as_fp8(name: str, w: torch.Tensor, shuffled: bool, idx: int, copies: dict):
     """bf16 experts [E, rows, K] (GLM-5.2's NextN layer) as shuffled block FP8,
     copied a few experts at a time."""
     qs, ss = [], []
@@ -188,25 +189,26 @@ def _experts_as_fp8(name: str, w: torch.Tensor, shuffled: bool, idx, copies: dic
     return q, s
 
 
-def _linear(
-    name: str, linear, rows: int, cols: int, copies: dict | None = None, idx=None
-):
+def _check_linear(name: str, linear, rows: int, cols: int) -> None:
+    """Raises unless ``linear`` is a bf16 or block-FP8 [rows, cols] linear."""
+    if linear.weight.dtype == torch.bfloat16:
+        _need(f"{name} weight", linear.weight, (rows, cols), (torch.bfloat16,))
+    else:
+        scale = getattr(linear, "weight_scale_inv", None)
+        _fp8(name, linear.weight, scale, rows, cols)
+
+
+def _linear(name: str, linear, rows: int, cols: int, idx: int, copies: dict):
     """A block-FP8 linear as SGLang keeps it after loading: (weight, scales,
     shuffled), shuffled meaning AITER's (16, 16) layout in place. A bf16 linear
-    (GLM-5.2's MXFP4 checkpoint) is copied as shuffled block FP8; without
-    ``copies`` it is only checked."""
-    if linear.weight.dtype == torch.bfloat16:
-        w = _need(f"{name} weight", linear.weight, (rows, cols), (torch.bfloat16,))
-        if copies is None:
-            return w, None, True
-        w, sc = _block_fp8(w)
-        copies["bf16 projections as block FP8", idx, name, "w"] = w
-        copies["bf16 projections as block FP8", idx, name, "s"] = sc
-        return w, sc, True
-    w, sc = _fp8(
-        name, linear.weight, getattr(linear, "weight_scale_inv", None), rows, cols
-    )
-    return w, sc, _shuffled(linear)
+    (GLM-5.2's MXFP4 checkpoint) is copied as shuffled block FP8."""
+    _check_linear(name, linear, rows, cols)
+    if linear.weight.dtype != torch.bfloat16:
+        return linear.weight, linear.weight_scale_inv, _shuffled(linear)
+    w, sc = _block_fp8(linear.weight)
+    copies["bf16 projections as block FP8", idx, name, "w"] = w
+    copies["bf16 projections as block FP8", idx, name, "s"] = sc
+    return w, sc, True
 
 
 def unshuffled_projections(layer) -> list[str]:
@@ -236,8 +238,8 @@ def dense_reason(layer, tp: int) -> Optional[str]:
     mlp, inter = layer.mlp, GLM5_GLOBAL_INTER // tp
     try:
         rows = mlp.gate_up_proj.weight.shape[0]
-        _linear("gate_up_proj", mlp.gate_up_proj, rows, HIDDEN)
-        _linear("down_proj", mlp.down_proj, HIDDEN, rows // 2)
+        _check_linear("gate_up_proj", mlp.gate_up_proj, rows, HIDDEN)
+        _check_linear("down_proj", mlp.down_proj, HIDDEN, rows // 2)
     except ValueError as e:
         return f"dense MLP: {e}"
     if rows % (2 * inter) or rows // (2 * inter) > MOE_SLOTS:
@@ -354,9 +356,9 @@ def _indexer(attn, idx: int, copies: dict):
     its scales, k LayerNorm weight and bias in f32, no timeline) and what it
     points at."""
     ind = attn.indexer
-    w_k, s_k, sh_k = _linear("indexer.wk", ind.wk, INDEX_DIM, HIDDEN, copies, idx)
+    w_k, s_k, sh_k = _linear("indexer.wk", ind.wk, INDEX_DIM, HIDDEN, idx, copies)
     w_q, s_q, sh_q = _linear(
-        "indexer.wq_b", ind.wq_b, INDEX_HEADS * INDEX_DIM, Q_LORA, copies, idx
+        "indexer.wq_b", ind.wq_b, INDEX_HEADS * INDEX_DIM, Q_LORA, idx, copies
     )
     w_w = _need(
         "indexer.weights_proj",
@@ -394,8 +396,8 @@ def _dense_mlp(mlp, idx: int, inter: int, copies: dict):
         mlp.gate_up_proj,
         mlp.gate_up_proj.weight.shape[0],
         HIDDEN,
-        copies,
         idx,
+        copies,
     )
     I = gu.shape[0] // 2
     if I % inter or I // inter > MOE_SLOTS or gu.shape[0] != 2 * I:
@@ -404,7 +406,7 @@ def _dense_mlp(mlp, idx: int, inter: int, copies: dict):
             f"slices of {inter}"
         )
     n = I // inter
-    dn, s_dn, sh_dn = _linear("down_proj", mlp.down_proj, HIDDEN, I, copies, idx)
+    dn, s_dn, sh_dn = _linear("down_proj", mlp.down_proj, HIDDEN, I, idx, copies)
     if sh_gu != sh_dn:
         raise ValueError("needs gate_up_proj and down_proj in one FP8 layout")
     gate, up = _slices(gu[:I], n), _slices(gu[I:], n)
@@ -453,13 +455,13 @@ def layer_weights(layer, idx: int, tp: int, copies: dict):
         attn.fused_qkv_a_proj_with_mqa,
         QKV_A,
         HIDDEN,
-        copies,
         idx,
+        copies,
     )
     w_qb, s_qb, sh_qb = _linear(
-        "q_b_proj", attn.q_b_proj, heads * (NOPE_DIM + PE_DIM), Q_LORA, copies, idx
+        "q_b_proj", attn.q_b_proj, heads * (NOPE_DIM + PE_DIM), Q_LORA, idx, copies
     )
-    w_o, s_o, sh_o = _linear("o_proj", attn.o_proj, HIDDEN, heads * V_DIM, copies, idx)
+    w_o, s_o, sh_o = _linear("o_proj", attn.o_proj, HIDDEN, heads * V_DIM, idx, copies)
     w_uk, s_uk, w_uv, s_uv = _uk_uv(attn, heads, idx, copies)
     index, keep, shuffles = None, (), (sh_qkv, sh_qb, sh_o)
     if attn.indexer is not None:
@@ -506,24 +508,39 @@ def layer_weights(layer, idx: int, tp: int, copies: dict):
         raise ValueError(why)
     experts = moe.experts
     inter = experts.w13_weight.shape[1] // 2
-    E = PHYSICAL_EXPERTS
     mxfp4 = is_mxfp4_experts(moe)
     if mxfp4:
-        w_ug = _bytes("w13_weight", experts.w13_weight, (E, 2 * inter, HIDDEN // 2))
-        s_ug = _bytes(
-            "w13_weight_scale", experts.w13_weight_scale, (E, 2 * inter, HIDDEN // 32)
+        w_ug = _bytes(
+            "w13_weight",
+            experts.w13_weight,
+            (PHYSICAL_EXPERTS, 2 * inter, HIDDEN // 2),
         )
-        w_dn = _bytes("w2_weight", experts.w2_weight, (E, HIDDEN, inter // 2))
+        s_ug = _bytes(
+            "w13_weight_scale",
+            experts.w13_weight_scale,
+            (PHYSICAL_EXPERTS, 2 * inter, HIDDEN // 32),
+        )
+        w_dn = _bytes(
+            "w2_weight", experts.w2_weight, (PHYSICAL_EXPERTS, HIDDEN, inter // 2)
+        )
         s_dn = _bytes(
-            "w2_weight_scale", experts.w2_weight_scale, (E, HIDDEN, inter // 32)
+            "w2_weight_scale",
+            experts.w2_weight_scale,
+            (PHYSICAL_EXPERTS, HIDDEN, inter // 32),
         )
     elif experts.w13_weight.dtype == torch.bfloat16:
         shuffled = _bf16_experts_shuffled(experts)
         w13 = _need(
-            "w13_weight", experts.w13_weight, (E, 2 * inter, HIDDEN), (torch.bfloat16,)
+            "w13_weight",
+            experts.w13_weight,
+            (PHYSICAL_EXPERTS, 2 * inter, HIDDEN),
+            (torch.bfloat16,),
         )
         w2 = _need(
-            "w2_weight", experts.w2_weight, (E, HIDDEN, inter), (torch.bfloat16,)
+            "w2_weight",
+            experts.w2_weight,
+            (PHYSICAL_EXPERTS, HIDDEN, inter),
+            (torch.bfloat16,),
         )
         w_ug, s_ug = _experts_as_fp8("w13", w13, shuffled, idx, copies)
         w_dn, s_dn = _experts_as_fp8("w2", w2, shuffled, idx, copies)
@@ -531,22 +548,25 @@ def layer_weights(layer, idx: int, tp: int, copies: dict):
         w_ug = _need(
             "w13_weight",
             experts.w13_weight,
-            (E, 2 * inter, HIDDEN),
+            (PHYSICAL_EXPERTS, 2 * inter, HIDDEN),
             (torch.float8_e4m3fn,),
         )
         s_ug = _need(
             "w13_weight_scale_inv",
             experts.w13_weight_scale_inv,
-            (E, 2 * inter // 128, HIDDEN // 128),
+            (PHYSICAL_EXPERTS, 2 * inter // 128, HIDDEN // 128),
             (torch.float32,),
         )
         w_dn = _need(
-            "w2_weight", experts.w2_weight, (E, HIDDEN, inter), (torch.float8_e4m3fn,)
+            "w2_weight",
+            experts.w2_weight,
+            (PHYSICAL_EXPERTS, HIDDEN, inter),
+            (torch.float8_e4m3fn,),
         )
         s_dn = _need(
             "w2_weight_scale_inv",
             experts.w2_weight_scale_inv,
-            (E, HIDDEN // 128, inter // 128),
+            (PHYSICAL_EXPERTS, HIDDEN // 128, inter // 128),
             (torch.float32,),
         )
     gate = moe.gate

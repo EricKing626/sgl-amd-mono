@@ -349,6 +349,50 @@ def test_mxfp4_experts_are_read_only_in_aiters_a4w4_layout():
     assert "GU-interleaved" in experts_reason(_mxfp4_moe(scale_dims=2))
 
 
+def _aiter_shuffle():
+    """AITER's (16, 16) shuffle (CPU torch); skipped where AITER does not import."""
+    try:
+        from aiter.ops.shuffle import shuffle_weight
+    except Exception as e:  # noqa: BLE001 - no AITER, or no ROCm to import it on
+        pytest.skip(f"AITER does not import: {type(e).__name__}: {e}")
+    return shuffle_weight
+
+
+@pytest.mark.parametrize("shape", [(1, 64, 256), (3, 512, 6144)])
+def test_unshuffle_bf16_inverts_aiter_shuffle(shape):
+    # GLM-5.2's bf16 NextN experts: SGLang shuffles them in place for AITER's CK MoE
+    from sgl_amd_mono.glm53.gfx950.weights import _unshuffle_bf16
+
+    w = torch.randn(shape, generator=torch.Generator().manual_seed(0)).bfloat16()
+    shuffled = _aiter_shuffle()(w.clone(), (16, 16))
+    assert not torch.equal(shuffled, w)
+    assert torch.equal(_unshuffle_bf16(shuffled), w)
+
+
+@pytest.mark.parametrize("rows,cols,bc", [(2624, 6144, 128), (1024, 192, 64)])
+def test_block_quant_pads_and_keeps_each_block_within_half_an_fp8_step(rows, cols, bc):
+    # 2,624 fused_qkv_a rows pad to 21 blocks; W_UK takes 128 x 64 blocks
+    from sgl_amd_mono.glm53.gfx950.weights import _block_quant
+
+    g = torch.Generator().manual_seed(rows)
+    w = (torch.randn(rows, cols, generator=g) * 2e-2).bfloat16()
+    w[:128, :bc] = 0
+    q, scale = _block_quant(w, 128, bc)
+    assert q.dtype == torch.float8_e4m3fn and tuple(q.shape) == (rows, cols)
+    assert tuple(scale.shape) == (-(-rows // 128), cols // bc)
+    s = scale.repeat_interleave(128, 0)[:rows].repeat_interleave(bc, 1)
+    deq = q.float() * s
+    assert torch.equal(deq[:128, :bc], torch.zeros(128, bc))
+    # E4M3's step is 32 at its top binade [256, 448]; ties land on 16 up to f32 scales
+    assert ((deq - w.float()).abs() <= 16 * s * (1 + 1e-4)).all()
+
+
+def test_a_bf16_dense_mlp_is_copied_not_refused():
+    from sgl_amd_mono.glm53.gfx950.weights import dense_reason
+
+    assert dense_reason(_dense_layer(dtype=torch.bfloat16), 8) is None
+
+
 def _linear(shuffled=True):
     # SGLang marks only the block-FP8 linears it rewrote into AITER's layout
     if not shuffled:
@@ -400,7 +444,7 @@ def _dense_layer(indexer=True, inter=DENSE_TP8, dtype=torch.float8_e4m3fn):
     layer = _layer(indexer=indexer)
     layer.mlp = SimpleNamespace(
         gate_up_proj=_fp8_linear(2 * inter, HIDDEN, dtype),
-        down_proj=_fp8_linear(HIDDEN, inter),
+        down_proj=_fp8_linear(HIDDEN, inter, dtype),
     )
     return layer
 
