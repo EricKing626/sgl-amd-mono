@@ -593,6 +593,11 @@ def _build(model, hf_config, ctx):
             eh=True,
             tokens=True,
             vocab_rows=eh.emb.shape[0],
+            # the NextN layer's own experts: the target's launches take theirs the
+            # same way, and Glm53LayerOp refuses weights whose mxfp4 is not the
+            # runtime's
+            mxfp4=weights.mxfp4,
+            native_fp4=weights.mxfp4,
         )
 
     head = head_weights(model, tp, rank, m.shared_head.norm)
