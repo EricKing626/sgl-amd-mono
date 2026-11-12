@@ -558,7 +558,7 @@ def _build(model, hf_config, ctx):
         )
     max_seq = -(-context_len // INDEX_KEYS_PER_TASK) * INDEX_KEYS_PER_TASK
     kv_fp8 = get_model().kv_cache_dtype == "fp8_e4m3"
-    extend_widths = sorted(ctx.widths)
+    extend_widths = sorted(w for w in ctx.widths if w <= target.max_rows(tp))
     # a draft decode step of 5 to 8 rows runs SGLang's path: the NextN shared launch
     # at 8 rows faulted in a kernel check (a process of several launches, not alone)
     decode_widths = [w for w in target.WIDTHS if w <= 4]

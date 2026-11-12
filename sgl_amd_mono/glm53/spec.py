@@ -59,9 +59,19 @@ from sgl_amd_mono.glm53 import HF_CONFIG
 
 # kernel widths; a step of fewer rows runs at the next width, the rest pad rows (a
 # one-row launch never completes on gfx950)
-WIDTHS = (2, 4, 8)
+WIDTHS = (2, 4, 8, 12, 16)
 ROWS = tuple(range(1, max(WIDTHS) + 1))
 TP_SIZES = (4, 8)
+# TP sizes whose launches take fewer rows than max(WIDTHS): TP4's 16 local heads put
+# a 16-row launch past the LDS budget (a wider step runs SGLang's path)
+TP_MAX_ROWS = {4: 12}
+
+
+def max_rows(tp: int) -> int:
+    """The most rows a launch takes at TP ``tp``."""
+    return TP_MAX_ROWS.get(tp, max(WIDTHS))
+
+
 # SGLang's DSA cache on ROCm: 64-token pages
 PAGE_SIZE = 64
 TOPK = 2048
@@ -395,6 +405,7 @@ class _Built:
         # per width, the guard blocks of its runtimes: a step advances them at once
         self.epochs = epochs
         self.max_position = context_len - 1
+        self.max_rows = max(w for w, _ in runtimes)
         self.check_layers = os.environ.get("SGLANG_AMD_MONO_CHECK") == "1"
         self.cos, self.sin = cos, sin
         self.steps, self.ids = {}, {}
@@ -437,7 +448,7 @@ class _Built:
     ):
         """``DeepseekV2ForCausalLM.forward`` for a routed decode or verify step."""
         lm = self.lm
-        if input_embeds is not None:
+        if input_embeds is not None or plan.key.rows > self.max_rows:
             return type(lm).forward(
                 lm, input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
             )
@@ -648,7 +659,13 @@ def _build(model, hf_config, ctx) -> _Built:
     # the keys an indexer row scores at most: the served context's, in whole tasks
     tasks = -(-context_len // INDEX_KEYS_PER_TASK)
     max_seq = tasks * INDEX_KEYS_PER_TASK
-    widths = sorted({_width(r) for r in ctx.widths})
+    cap = max_rows(tp)
+    widths = sorted({_width(r) for r in ctx.widths if r <= cap})
+    if not widths:
+        raise ValueError(
+            f"GLM-5.3 monokernel: TP{tp} runs at most {cap} rows on the kernels, and "
+            f"this server's decode graphs route {sorted(ctx.widths)}"
+        )
     runtimes, heads = {}, {}
     epochs = {w: Glm53Epochs(len(kinds) + 1, device) for w in widths}
 

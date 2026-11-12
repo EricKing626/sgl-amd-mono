@@ -112,7 +112,9 @@ KINDS = ("embed", "dense", "index", "shared", "head")
 
 def test_a_step_runs_at_the_next_width():
     # a one-row launch never completes on gfx950: one row runs at width 2
-    assert [glm53._width(r) for r in glm53.ROWS] == [2, 2, 4, 4, 8, 8, 8, 8]
+    assert [glm53._width(r) for r in glm53.ROWS] == (
+        [2, 2, 4, 4] + [8] * 4 + [12] * 4 + [16] * 4
+    )
 
 
 def test_a_step_from_embeddings_runs_the_model_s_forward():
