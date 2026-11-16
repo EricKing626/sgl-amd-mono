@@ -18,6 +18,7 @@ The library implements SGLang's monokernel interface ([RFC #43949](https://githu
 | DeepSeek-V4-Pro | MI355X (gfx950) | 8 | All 61 layers (one launch each) in decode steps of up to 8 rows, and DSpark verify steps of one request (5 to 8 tokens) |
 | GLM-5.3-Flash | MI355X (gfx950) | 2, 4, 8 | All 45 layers (one launch each; layer 0 from the tokens, with the embedding) and the final norm, LM head and logits (one launch), in decode steps of up to 8 rows (4 at TP2) |
 | GLM-5.3 | MI355X (gfx950) | 4, 8 | All 75 MoE layers (one launch each), in decode and MTP verify steps of up to 8 rows |
+| GLM-5.2 (MXFP4 experts) | MI355X (gfx950) | 4, 8 | As GLM-5.3; the routed experts in MXFP4, on MXFP8 activations |
 | Kimi-K3 | MI350X, MI355X (gfx950) | 8 | Every MoE layer in decode and DSpark verify steps of up to 8 rows |
 | Kimi-K3.1 | MI350X, MI355X (gfx950) | 8 | Kimi-K3's launches on every MoE layer in DSpark and DFLASH verify steps of one request (the MLA layers' projection front too, without DCP), and one launch a KDA layer in verify steps of 2 to 48 requests |
 | MiniMax-M3 (MXFP4) | MI350X, MI355X (gfx950) | 4 | The 57 sparse MoE layers in decode and EAGLE3 verify steps of up to 16 rows |
@@ -82,6 +83,10 @@ SGLANG_USE_AITER=1 python -m sglang.launch_server \
   --speculative-num-draft-tokens 4 \
   --monokernel-backend amd
 ```
+
+The Quark checkpoint `amd/GLM-5.2-MXFP4` (MXFP4 routed experts, the rest bf16)
+serves with the same flags; the kernels copy its bf16 matrices to FP8 once at
+startup (`sgl_amd_mono/glm53/README.md`).
 
 MiniMax-M3, with an EAGLE3 draft:
 
@@ -202,6 +207,7 @@ sgl-amd-mono/
 │   │   ├── check.py     # SGLANG_AMD_MONO_CHECK: each layer against SGLang's own
 │   │   └── gfx950/      # kernels and launch runner
 │   ├── glm53/
+│   │   ├── README.md    # the launches, the weights of both checkpoints and the tests
 │   │   ├── spec.py      # spec and forward
 │   │   ├── check.py     # SGLANG_AMD_MONO_CHECK: each layer against SGLang's own
 │   │   └── gfx950/      # kernels and launch runner

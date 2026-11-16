@@ -485,7 +485,8 @@ def dense(L, op, ref: dict, out: torch.Tensor, S: int) -> None:
     f32 gate | up on its own FP8 activations (``dense.mid.rel``), its output (output
     minus FFN input) against the f32 down projection of its own quantized mid
     (``dense.x.rel``), and both its output and SGLang's MLP on the same FFN input
-    against an f32 MLP (``dense.x_vs_fp32.rel``, ``dense.stock_vs_fp32.rel``; their
+    (a bf16 MLP: SGLang's FP8 MLP on the launch's copy) against an f32 MLP
+    (``dense.x_vs_fp32.rel``, ``dense.stock_vs_fp32.rel``; their
     ratio less one is ``dense.excess.rel``). Every rank its shard, summed over the TP
     group."""
     from sglang.srt.distributed.communication_op import (
@@ -505,15 +506,24 @@ def dense(L, op, ref: dict, out: torch.Tensor, S: int) -> None:
     inter = wug.shape[1] // 2
     gu = torch.einsum("sk,njk->snj", x, wug)
     mid32 = torch.nn.functional.silu(gu[..., :inter]) * gu[..., inter:]
-    both = torch.cat(
-        [parts["down"], torch.einsum("sni,nhi->sh", mid32, wdn)], 0
-    ).contiguous()
-    both = tensor_model_parallel_all_reduce(both)
-    down, f32 = both[:S], both[S:]
-    stock = mlp(x.to(torch.bfloat16))
-    # SGLang fuses the dense MLP's TP reduce into the next residual add and norm
-    if not mlp.down_proj.reduce_results:
-        stock = tensor_model_parallel_all_reduce(stock.contiguous())
+    sums = [parts["down"], torch.einsum("sni,nhi->sh", mid32, wdn)]
+    # A bf16 MLP (GLM-5.2's MXFP4 checkpoint) runs on the launch's block-FP8 copy,
+    # which the f32 MLP reads too: against it SGLang's bf16 MLP would carry the copy's
+    # rounding, not an FP8 MLP's. Its stock side is SGLang's per-128 FP8 MLP on the copy.
+    copied = mlp.gate_up_proj.weight.dtype == torch.bfloat16
+    if copied:
+        gq = torch.einsum("sk,njk->snj", _q128(x.to(torch.bfloat16)), wug)
+        mid_q = torch.nn.functional.silu(gq[..., :inter]) * gq[..., inter:]
+        sums.append(torch.einsum("sni,nhi->sh", _q128(mid_q), wdn))
+    both = tensor_model_parallel_all_reduce(torch.cat(sums, 0).contiguous())
+    down, f32 = both[:S], both[S : 2 * S]
+    if copied:
+        stock = both[2 * S :]
+    else:
+        stock = mlp(x.to(torch.bfloat16))
+        # SGLang fuses the dense MLP's TP reduce into the next residual add and norm
+        if not mlp.down_proj.reduce_results:
+            stock = tensor_model_parallel_all_reduce(stock.contiguous())
     mine = out.float() - a.float()
     values = {
         "dense.attn.rel": _rel(launch_o_proj(op, S), o_ref),

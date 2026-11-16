@@ -199,11 +199,15 @@ NUMERICS = Numerics(
         # The MTP draft (draft.py, check.draft). Its NextN entry x against SGLang's
         # eh_proj on its own enorm | hnorm rows, and against an f32 entry: 3x the
         # serving check's maxima (TP8, FP8 KV, 1-2 requests, 1K-64K: 4.7e-4, 2.9e-3,
-        # SGLang's own 2.9e-3); the enorm and hnorm weights swapped give 0.58. A draft
+        # SGLang's own 2.9e-3); the enorm and hnorm weights swapped give 0.58. On
+        # GLM-5.2's MXFP4 checkpoint SGLang's eh_proj is a ReplicatedLinear on AITER's
+        # bf16 GEMM, farther from f32 than the launch (3.6e-3 to 4.6e-3, the launch
+        # 2.3e-3 to 3.6e-3, on every check), so the two part by up to 4.4e-3: the
+        # first bound is 3x that, and the f32 bound holds the launch. A draft
         # decode row attends exactly the seed's valid entries, and the seed SGLang
         # gets is the draft extend's top-k; a count from the row's position or every
         # seed row row 0's gives 1-2 and 4-936.
-        "draft.eh.rel": 1.4e-3,
+        "draft.eh.rel": 1.3e-2,
         "draft.eh_vs_fp32.rel": 8.8e-3,
         "draft.topk_extra.max_abs": 0.0,
         "draft.seed.max_abs": 0.0,
