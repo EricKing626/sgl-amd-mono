@@ -40,9 +40,10 @@ class Glm53Build(msgspec.Struct, frozen=True):
     a dense MLP of that many expert-shaped slices instead of the MoE; ``tokens``:
     the layer starts from the step's tokens and ``vocab_rows`` embedding rows a
     rank; ``eh``: the layer starts from the NextN entry, eh_proj(enorm(e) |
-    hnorm(h)); ``head``: the tail, on ``vocab_rows`` LM-head rows a rank.
-    ``mxfp4``: the experts are Quark MXFP4 in AITER's A4W4 layout, not block FP8;
-    ``native_fp4``: their rows as MXFP8 on the FP4 MFMA (else bf16 rows)."""
+    hnorm(h)); ``head``: the tail, on ``vocab_rows`` LM-head rows a rank;
+    ``mxfp4``: the MoE and dense MLPs are MXFP4, not block FP8; ``native_fp4``:
+    their rows as MXFP8 on the FP4 MFMA in ATOM's layout (GLM-5.2's checkpoint),
+    else the rows are MXFP4 too (``act_fp4``)."""
 
     rows: int
     tp: int
@@ -84,7 +85,8 @@ class Glm53Weights(msgspec.Struct, frozen=True):
     weight and bias f32 copies. ``index``: an indexer layer's pointer table.
     ``dense``: a dense layer's MLP as that many expert-shaped slices (copies) in the
     expert tensors, its router tensors unread; a tokens layer's ``w_r`` is this
-    rank's embedding rows."""
+    rank's embedding rows. ``mxfp4``: the experts (or the dense slices) are MXFP4
+    E2M1 bytes in AITER's (16, 16) layout with ``e8m0_shuffle`` E8M0 codes."""
 
     g_in: torch.Tensor
     g_q: torch.Tensor
@@ -223,7 +225,8 @@ class Glm53Runtime:
             tokens=key.tokens,
             head_vocab=key.vocab_rows * key.tp if key.head else 0,
             eh_tiles=key.eh_tiles,
-            native_fp4_mfma=key.native_fp4,
+            native_fp4_mfma=key.mxfp4 and key.native_fp4,
+            act_fp4=key.mxfp4 and not key.native_fp4,
         )
         self.launch = build_glm5_monokernel(
             key.rows,
@@ -254,8 +257,9 @@ class Glm53Runtime:
             tail=key.head,
             eh_entry=key.eh,
             expert_mxfp4=key.mxfp4,
-            atom_experts=key.mxfp4,
-            native_fp4_mfma=key.native_fp4,
+            atom_experts=key.mxfp4 and key.native_fp4,
+            native_fp4_mfma=key.mxfp4 and key.native_fp4,
+            act_fp4=key.mxfp4 and not key.native_fp4,
         )
         self.dispatch = partial(_run_compiled, self.launch)
         self.peer = PeerBuffer(self.sy["_bytes"], group, rank, key.tp, device)
@@ -330,6 +334,10 @@ class Glm53LayerOp:
         if weights.dense != key.dense:
             raise ValueError(
                 f"weights of {weights.dense} dense slices on a runtime of {key.dense}"
+            )
+        if weights.mxfp4 != key.mxfp4:
+            raise ValueError(
+                f"weights with mxfp4={weights.mxfp4} on a runtime with mxfp4={key.mxfp4}"
             )
         if weights.shuffled != key.fp8_shuffled:
             raise ValueError(
