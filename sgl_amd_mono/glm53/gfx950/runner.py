@@ -41,7 +41,9 @@ class Glm53Build(msgspec.Struct, frozen=True):
     the layer starts from the step's tokens and ``vocab_rows`` embedding rows a
     rank; ``eh``: the layer starts from the NextN entry, eh_proj(enorm(e) |
     hnorm(h)); ``head``: the tail, on ``vocab_rows`` LM-head rows a rank;
-    ``mxfp4``: the MoE and dense MLPs in MXFP4."""
+    ``mxfp4``: the MoE and dense MLPs are MXFP4, not block FP8; ``native_fp4``:
+    their rows as MXFP8 on the FP4 MFMA in ATOM's layout (GLM-5.2's checkpoint),
+    else the rows are MXFP4 too (``act_fp4``)."""
 
     rows: int
     tp: int
@@ -59,6 +61,7 @@ class Glm53Build(msgspec.Struct, frozen=True):
     vocab_rows: int = 0
     eh: bool = False
     mxfp4: bool = False
+    native_fp4: bool = False
 
     @property
     def heads(self) -> int:
@@ -222,7 +225,8 @@ class Glm53Runtime:
             tokens=key.tokens,
             head_vocab=key.vocab_rows * key.tp if key.head else 0,
             eh_tiles=key.eh_tiles,
-            act_fp4=key.mxfp4,
+            native_fp4_mfma=key.mxfp4 and key.native_fp4,
+            act_fp4=key.mxfp4 and not key.native_fp4,
         )
         self.launch = build_glm5_monokernel(
             key.rows,
@@ -253,7 +257,9 @@ class Glm53Runtime:
             tail=key.head,
             eh_entry=key.eh,
             expert_mxfp4=key.mxfp4,
-            act_fp4=key.mxfp4,
+            atom_experts=key.mxfp4 and key.native_fp4,
+            native_fp4_mfma=key.mxfp4 and key.native_fp4,
+            act_fp4=key.mxfp4 and not key.native_fp4,
         )
         self.dispatch = partial(_run_compiled, self.launch)
         self.peer = PeerBuffer(self.sy["_bytes"], group, rank, key.tp, device)
@@ -337,6 +343,10 @@ class Glm53LayerOp:
             raise ValueError(
                 f"weights with shuffled={weights.shuffled} on a runtime with "
                 f"fp8_shuffled={key.fp8_shuffled}"
+            )
+        if weights.mxfp4 != key.mxfp4:
+            raise ValueError(
+                f"weights with mxfp4={weights.mxfp4} on a runtime with mxfp4={key.mxfp4}"
             )
         if (eh is not None) != key.eh:
             raise ValueError(

@@ -193,6 +193,11 @@ def _standard_reasons(model, hf_config) -> list[str]:
         and getattr(eh, "bias", None) is None
     ):
         reasons.append(f"eh_proj is a {type(eh).__name__} ({method})")
+    from sgl_amd_mono.glm53.gfx950.weights import experts_reason
+
+    why = experts_reason(model.model.decoder.mlp)
+    if why is not None:
+        reasons.append(f"the NextN experts: {why}")
     return reasons
 
 
@@ -599,7 +604,12 @@ def _build(model, hf_config, ctx):
             eh=True,
             tokens=True,
             vocab_rows=eh.emb.shape[0],
+            # the NextN layer's own experts: the target's launches take theirs the
+            # same way, and Glm53LayerOp refuses weights whose mxfp4 is not the
+            # runtime's. Its rows are MXFP4 (``act_fp4``) as the MXFP4 checkpoint's
+            # target is; GLM-5.2 keeps this layer bf16, so mxfp4 is False there.
             mxfp4=weights.mxfp4,
+            native_fp4=False,
         )
 
     head = head_weights(model, tp, rank, m.shared_head.norm)

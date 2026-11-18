@@ -141,6 +141,27 @@ class TestMonoGlm53Kernels(CustomTestCase):
     def test_mxfp4_launches_write_their_rows_and_replay(self):
         for kind in ("shared", "index", "dense", "embed"):
             self._check("--kind", kind, "--rowsets", "p1", "--writes", "--mxfp4")
+
+    def test_mxfp8_rows_launches_write_their_rows_and_replay(self):
+        # GLM-5.2's Quark checkpoint: MXFP4 experts on MXFP8 rows (the FP4 MFMA), as
+        # served; the dense layers and the NextN layer keep FP8 experts
+        mxfp4 = ("--mxfp4", "--native-fp4")
+        for kind in ("shared", "index"):
+            for kv in ("bf16", "fp8"):
+                self._check(
+                    "--kind", kind, "--kv", kv, "--rowsets", "p1", "--writes", *mxfp4
+                )
+        self._check(
+            "--kind",
+            "model",
+            "--launches",
+            "8",
+            "--replays",
+            "20",
+            "--rowsets",
+            "p0,v4",
+            *mxfp4,
+        )
         self._check(
             "--kind",
             "full",
@@ -150,8 +171,9 @@ class TestMonoGlm53Kernels(CustomTestCase):
             "20",
             "--rowsets",
             "p1,v4",
-            "--mxfp4",
+            *mxfp4,
         )
+        self._check("--kind", "index", "--check-tags", "--rowsets", "p0,v4", *mxfp4)
 
     def test_mxfp4_nextn_launches_equal_the_plain_ones_on_their_entry(self):
         self._check("--mxfp4", script=NEXTN)

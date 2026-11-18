@@ -641,10 +641,11 @@ def _build(model, hf_config, ctx) -> _Built:
     if len(shuffled) != 1:
         raise ValueError("GLM-5.3 monokernel: the layers' FP8 layouts differ")
     fp8_shuffled = shuffled.pop()
-    mxfp4 = {L.w.mxfp4 for L in layers.values()}
-    if len(mxfp4) != 1:
-        raise ValueError("GLM-5.3 monokernel: the layers' MLPs differ in FP8 / MXFP4")
-    mxfp4 = mxfp4.pop()
+    # Each kind's runtime takes its own layers' form, so the dense layers and the
+    # MoE ones need not agree: GLM-5.2's MXFP4 checkpoint keeps its dense MLPs in
+    # bf16 (copied as block FP8) next to MXFP4 experts. A dense MLP that is itself
+    # MXFP4 is the MXFP4 checkpoint's, whose rows run MXFP4 too.
+    dense_mxfp4 = any(L.w.mxfp4 for L in layers.values() if L.w.dense)
     dense = {L.w.dense for L in layers.values() if L.w.dense}
     if len(dense) > 1 or not layers[0].w.dense or layers[0].w.index is None:
         raise ValueError(
@@ -717,7 +718,11 @@ def _build(model, hf_config, ctx) -> _Built:
                 dense=layers[ids[0]].w.dense,
                 tokens=kind == "embed",
                 vocab_rows=vocab_rows if kind == "embed" else 0,
-                mxfp4=mxfp4,
+                mxfp4=layers[ids[0]].w.mxfp4,
+                # MXFP4 experts on MXFP8 rows (ATOM's layout, the FP4 MFMA): at 6
+                # rows and 64K keys 69 us a shared layer, the bf16 rows' dequant
+                # path 106 us. The MXFP4 checkpoint's own MLPs run MXFP4 rows.
+                native_fp4=layers[ids[0]].w.mxfp4 and not dense_mxfp4,
             )
             rt = runtime(key)
             runtimes[w, kind] = rt

@@ -404,6 +404,11 @@ class Model:
                 tokens=kind == "embed",
                 vocab_rows=vocab_rows if kind == "embed" else 0,
                 mxfp4=mxfp4,
+                # the MXFP8-rows form (GLM-5.2's): the MoE layers only, the dense
+                # slices stay on the MXFP4 rows the generator builds
+                native_fp4=w.mxfp4
+                and not w.dense
+                and getattr(args, "native_fp4", False),
             )
             self.runtimes[kind] = Glm53Runtime(key, rank, group, device)
             self.runtimes[kind].set_deadline(args.deadline)
@@ -953,11 +958,21 @@ def main() -> int:
     ap.add_argument("--similar", type=float, default=0.0, help="rows routing alike")
     ap.add_argument("--mxfp4", action="store_true", help="MXFP4 MLPs")
     ap.add_argument("--compare", nargs=2, metavar=("A_DIR", "B_DIR"))
+    ap.add_argument(
+        "--positions", default="", help="comma-separated live-row positions"
+    )
+    ap.add_argument("--mxfp4", action="store_true", help="MXFP4 (A4W4) MoE experts")
+    ap.add_argument(
+        "--native-fp4", action="store_true", help="MXFP8 x MXFP4 MFMA (with --mxfp4)"
+    )
     args = ap.parse_args()
     if args.mxfp4 and args.check_dense:
         ap.error("--check-dense checks the FP8 dense MLP (MXFP4: check_mxfp4.py)")
     if args.compare:
         return compare(*args.compare)
+    if args.positions:
+        global POSITIONS
+        POSITIONS = [int(p) for p in args.positions.split(",")]
     rank, tp = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     device = torch.device("cuda", torch.cuda.current_device())

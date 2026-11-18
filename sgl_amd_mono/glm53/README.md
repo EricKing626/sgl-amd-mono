@@ -40,11 +40,21 @@ checkpoint `GLM_53_MODEL_PATH` names).
 
 ## Checkpoints
 
-| module | `zai-org/GLM-5.3` | `amd/GLM-5.3-Quark-MXFP4-AttnFP8` |
-| --- | --- | --- |
-| attention and indexer linears | FP8 (128 x 128 blocks) | FP8 (128 x 128 blocks) |
-| dense MLPs (layers 0 to 2), routed and shared experts | FP8 | MXFP4 |
+| module | `zai-org/GLM-5.3` | `amd/GLM-5.3-Quark-MXFP4-AttnFP8` | `amd/GLM-5.2-MXFP4` |
+| --- | --- | --- | --- |
+| attention and indexer linears | FP8 (128 x 128 blocks) | FP8 (128 x 128 blocks) | bf16, copied once at startup |
+| dense MLPs (layers 0 to 2) | FP8 | MXFP4 | bf16, copied once at startup |
+| routed and shared experts | FP8 | MXFP4 | MXFP4 |
 
 `Glm53Build.mxfp4` selects the MLP format. FP8 MLPs quantize their activations to FP8 per 128 values. MXFP4 MLPs
 quantize them to MXFP4 (one E8M0 scale per 32 values) and run FP4 x FP4 MFMAs; the quantization equals SGLang's
 bitwise (AITER `fused_moe` per_1x32 for the experts, Triton `dynamic_mxfp4_quant` for the dense MLPs).
+
+`amd/GLM-5.2-MXFP4` has GLM-5.3's architecture, so the same launches serve it, but its Quark checkpoint keeps only the
+routed and shared experts in MXFP4 and every other matrix in bf16. `Glm53Build.native_fp4` runs those experts against
+MXFP8 rows on the FP4 MFMA (AITER's A4W4 weights in ATOM's addressing) instead of the MXFP4 rows above, which is why
+the two forms cannot share a launch: the kernel asserts `act_fp4` and `atom_experts` apart. The bf16 matrices have no
+launch path, so `weights.py` copies each one to 128 x 128 block FP8 at build, about 2.7 GiB a rank, and records it in
+`copies` for the startup log. In check mode this makes the launch and SGLang's forward read different weights on the
+dense layers and on the draft's entry, so `check.dense` takes SGLang's per-128 FP8 MLP on that copy as its stock side
+and `NUMERICS` carries the wider `draft.eh.rel`.

@@ -214,7 +214,10 @@ class TestMonokernelCheck(CustomTestCase):
         """SGLANG_AMD_MONO_CHECK (eager) on one server, each (requests, repeats)
         batch of a record prompt in turn: both kinds of layer checked at every
         count in ``rows``, an indexer layer past ``past`` keys, and no violation."""
+        from transformers import AutoTokenizer
+
         para = "The river valley archive lists the flood height of every year. "
+        tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
         with (
             tempfile.NamedTemporaryFile("w+", suffix=".out") as out,
             tempfile.NamedTemporaryFile("w+", suffix=".err") as err,
@@ -231,20 +234,28 @@ class TestMonokernelCheck(CustomTestCase):
             )
             try:
                 for n, repeats in batches:
-                    r = requests.post(
-                        DEFAULT_URL_FOR_TEST + "/generate",
-                        json={
-                            "text": [
-                                f"Record {i}. " + para * repeats for i in range(n)
-                            ],
-                            "sampling_params": {
-                                "max_new_tokens": new_tokens,
-                                "temperature": 0,
+                    # The batch's rows must decode together, but the server tokenizes
+                    # long texts one at a time, seconds apart, and prefills long
+                    # prompts a few at a time: a request in first would decode its
+                    # few tokens alone. So the prompts go as token ids, and one token
+                    # each first puts every prompt in the radix cache.
+                    ids = [
+                        tokenizer(f"Record {i}. " + para * repeats)["input_ids"]
+                        for i in range(n)
+                    ]
+                    for tokens in (1, new_tokens):
+                        r = requests.post(
+                            DEFAULT_URL_FOR_TEST + "/generate",
+                            json={
+                                "input_ids": ids,
+                                "sampling_params": {
+                                    "max_new_tokens": tokens,
+                                    "temperature": 0,
+                                },
                             },
-                        },
-                        timeout=600,
-                    )
-                    r.raise_for_status()
+                            timeout=600,
+                        )
+                        r.raise_for_status()
             finally:
                 terminate_and_kill_process_tree(process)
             err.seek(0)
