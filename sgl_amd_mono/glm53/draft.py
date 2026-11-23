@@ -228,8 +228,9 @@ class _Draft:
         self.epochs = epochs
         self.cos, self.sin = cos, sin
         self.max_position = max_position
-        # a draft extend's rows at most (whole requests), a draft decode step's
-        self.max_extend = max(w for k, w in ops if k == "index")
+        # a draft extend's rows (whole requests, each at its own width), a draft
+        # decode step's at most
+        self.extend_widths = frozenset(w for k, w in ops if k == "index")
         self.decode_widths = tuple(sorted(w for k, w in ops if k == "shared"))
         self.max_decode = self.decode_widths[-1]
         self.extend_rows = _tokens_per_request(lm)
@@ -285,7 +286,7 @@ class _Draft:
         if R < 1:
             return None
         if mode.is_draft_extend_v2():
-            if n == R * self.extend_rows and n <= self.max_extend:
+            if n == R * self.extend_rows and n in self.extend_widths:
                 return "index", n
             return None
         if mode.is_decode() and n == R and n <= self.max_decode:
@@ -563,13 +564,11 @@ def _build(model, hf_config, ctx):
     max_seq = -(-context_len // INDEX_KEYS_PER_TASK) * INDEX_KEYS_PER_TASK
     kv_fp8 = get_model().kv_cache_dtype == "fp8_e4m3"
     allowed = target.tp_widths(p.tp_size)
-    cap = max(allowed)
-    # a TP size with its own widths extends only at them
-    extend_widths = sorted(
-        w
-        for w in ctx.widths
-        if w <= cap and (p.tp_size not in target.TP_WIDTHS or w in allowed)
-    )
+    # SGLang routes every multiple of the draft tokens: a launch takes any rows up
+    # to 8, and past 8 only a width of this TP size (odd rows past 8 do not trace,
+    # and the kernel checks run 12 and 16); a draft extend runs at its own rows, so
+    # the other extends run SGLang's path
+    extend_widths = sorted(w for w in ctx.widths if w <= 8 or w in allowed)
     # a draft decode step of 5 to 8 rows runs SGLang's path: the NextN shared launch
     # at 8 rows faulted in a kernel check (a process of several launches, not alone)
     decode_widths = [w for w in allowed if w <= 4]

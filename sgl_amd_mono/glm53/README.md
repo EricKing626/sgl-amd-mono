@@ -16,9 +16,11 @@ next width the server built; its rows past the step's are pad rows (a one-row la
 | 4 | 2, 4, 8, 12 | SGLang's forward |
 
 At TP4 a rank has 16 attention heads, and a 16-row launch's LDS arena outgrows the 160 KiB a workgroup has, so
-`spec.TP_WIDTHS` caps TP4 at 12 rows. Up to 8 rows a launch's arena stays within 128 KiB. The NextN draft runs its
-extend (whole requests, up to the target's widths) and its decode steps of up to 4 rows on the launches; a draft
-decode step of 5 or more rows runs SGLang's path.
+`spec.TP_WIDTHS` caps TP4 at 12 rows. Up to 8 rows a launch's arena stays within 128 KiB. GLM-5.2's MXFP4 experts on
+MXFP8 rows (the FP4 MFMA, `native_fp4`) launch up to 8 rows at either TP size (`spec.NATIVE_FP4_ROWS`). The NextN
+draft runs its extends of whole requests on the launches at their own rows: any rows up to 8, and past 8 the TP
+size's widths (a 9-row extend of 3 requests of 3 tokens runs SGLang's path). It runs its decode steps of up to 4 rows
+on the launches; a draft decode step of 5 or more rows runs SGLang's path.
 
 ## Files
 

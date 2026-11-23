@@ -67,10 +67,14 @@ TP_SIZES = (4, 8)
 # the launch widths at a TP size, if not WIDTHS: at TP4 (16 heads a rank) a 16-row
 # launch outgrows the LDS, so a step past 12 rows runs SGLang's path
 TP_WIDTHS = {4: (2, 4, 8, 12)}
+# MXFP4 experts on MXFP8 rows (GLM-5.2, the FP4 MFMA) launch up to 8 rows: their
+# down past 8 rows is not built here
+NATIVE_FP4_ROWS = 8
 
 
-def tp_widths(tp: int) -> tuple:
-    return TP_WIDTHS.get(tp, WIDTHS)
+def tp_widths(tp: int, native_fp4: bool = False) -> tuple:
+    widths = TP_WIDTHS.get(tp, WIDTHS)
+    return tuple(w for w in widths if w <= NATIVE_FP4_ROWS) if native_fp4 else widths
 
 
 # SGLang's DSA cache on ROCm: 64-token pages
@@ -646,6 +650,9 @@ def _build(model, hf_config, ctx) -> _Built:
     # bf16 (copied as block FP8) next to MXFP4 experts. A dense MLP that is itself
     # MXFP4 is the MXFP4 checkpoint's, whose rows run MXFP4 too.
     dense_mxfp4 = any(L.w.mxfp4 for L in layers.values() if L.w.dense)
+    native_fp4 = not dense_mxfp4 and any(
+        L.w.mxfp4 for L in layers.values() if not L.w.dense
+    )
     dense = {L.w.dense for L in layers.values() if L.w.dense}
     if len(dense) > 1 or not layers[0].w.dense or layers[0].w.index is None:
         raise ValueError(
@@ -679,7 +686,7 @@ def _build(model, hf_config, ctx) -> _Built:
     # the keys an indexer row scores at most: the served context's, in whole tasks
     tasks = -(-context_len // INDEX_KEYS_PER_TASK)
     max_seq = tasks * INDEX_KEYS_PER_TASK
-    allowed = tp_widths(p.tp_size)
+    allowed = tp_widths(p.tp_size, native_fp4)
     cap = max(allowed)
     widths = sorted({_width(r, allowed) for r in ctx.widths if r <= cap})
     if not widths:
@@ -722,7 +729,7 @@ def _build(model, hf_config, ctx) -> _Built:
                 # MXFP4 experts on MXFP8 rows (ATOM's layout, the FP4 MFMA): at 6
                 # rows and 64K keys 69 us a shared layer, the bf16 rows' dequant
                 # path 106 us. The MXFP4 checkpoint's own MLPs run MXFP4 rows.
-                native_fp4=layers[ids[0]].w.mxfp4 and not dense_mxfp4,
+                native_fp4=native_fp4 and layers[ids[0]].w.mxfp4,
             )
             rt = runtime(key)
             runtimes[w, kind] = rt

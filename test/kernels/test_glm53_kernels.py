@@ -28,6 +28,8 @@ from pathlib import Path
 import torch
 from sglang.test.test_utils import CustomTestCase
 
+from sgl_amd_mono.glm53 import spec as glm53
+
 
 def _gfx950_gpus() -> int:
     if not (torch.cuda.is_available() and torch.version.hip):
@@ -47,8 +49,9 @@ WIDTHS = {4: "2,4,8,12", 8: "2,4,8,12,16"}
 
 @unittest.skipIf(_gfx950_gpus() < 8, "needs 8 gfx950 GPUs")
 class TestMonoGlm53Kernels(CustomTestCase):
-    def _check(self, *args: str, script: Path = CHECK) -> None:
-        for tp, rows in WIDTHS.items():
+    def _check(self, *args: str, script: Path = CHECK, max_rows: int = 16) -> None:
+        for tp, widths in WIDTHS.items():
+            rows = ",".join(w for w in widths.split(",") if int(w) <= max_rows)
             cmd = [
                 sys.executable,
                 "-m",
@@ -90,19 +93,19 @@ class TestMonoGlm53Kernels(CustomTestCase):
         )
 
     def test_a_wide_step_s_rows_equal_4_row_launches_on_them(self):
-        # each request's 4 verify rows of a step of 2 to 4 requests (the widths past
-        # 4 rows) against a 4-row launch of that request, bitwise, on FP8 and MXFP4
-        # MLPs
-        for mlp in ((), ("--mxfp4",)):
+        # each run of 4 rows of a wider step against a 4-row launch on them, bitwise:
+        # one request a row (decode, the CI recipe's step) and 4 verify rows a
+        # request, on the bf16 and the E4M3 MLA cache, and on FP8 and MXFP4 MLPs
+        for kv, mlp in (("bf16", ()), ("fp8", ()), ("fp8", ("--mxfp4",))):
             self._check(
                 "--kind",
                 "model",
                 "--launches",
                 "4",
                 "--rowsets",
-                "v4",
+                "p0,v4",
                 "--kv",
-                "fp8",
+                kv,
                 "--split-check",
                 "4",
                 *mlp,
@@ -144,14 +147,17 @@ class TestMonoGlm53Kernels(CustomTestCase):
 
     def test_mxfp8_rows_launches_write_their_rows_and_replay(self):
         # GLM-5.2's Quark checkpoint: MXFP4 experts on MXFP8 rows (the FP4 MFMA), as
-        # served; the dense layers and the NextN layer keep FP8 experts
-        mxfp4 = ("--mxfp4", "--native-fp4")
+        # served (up to spec.NATIVE_FP4_ROWS); the dense layers and the NextN layer
+        # keep FP8 experts
+        def check(*args):
+            self._check(
+                *args, "--mxfp4", "--native-fp4", max_rows=glm53.NATIVE_FP4_ROWS
+            )
+
         for kind in ("shared", "index"):
             for kv in ("bf16", "fp8"):
-                self._check(
-                    "--kind", kind, "--kv", kv, "--rowsets", "p1", "--writes", *mxfp4
-                )
-        self._check(
+                check("--kind", kind, "--kv", kv, "--rowsets", "p1", "--writes")
+        check(
             "--kind",
             "model",
             "--launches",
@@ -160,20 +166,11 @@ class TestMonoGlm53Kernels(CustomTestCase):
             "20",
             "--rowsets",
             "p0,v4",
-            *mxfp4,
         )
-        self._check(
-            "--kind",
-            "full",
-            "--launches",
-            "7",
-            "--replays",
-            "20",
-            "--rowsets",
-            "p1,v4",
-            *mxfp4,
+        check(
+            "--kind", "full", "--launches", "7", "--replays", "20", "--rowsets", "p1,v4"
         )
-        self._check("--kind", "index", "--check-tags", "--rowsets", "p0,v4", *mxfp4)
+        check("--kind", "index", "--check-tags", "--rowsets", "p0,v4")
 
     def test_mxfp4_nextn_launches_equal_the_plain_ones_on_their_entry(self):
         self._check("--mxfp4", script=NEXTN)

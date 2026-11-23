@@ -40,6 +40,10 @@ LAUNCH_TIMEOUT = 3600
 # the MXFP4 checkpoint (amd/GLM-5.3-Quark-MXFP4-AttnFP8), not the FP8 one
 _quant = AutoConfig.from_pretrained(MODEL, trust_remote_code=True).quantization_config
 MXFP4 = _quant.get("quant_method") == "quark"
+# GLM-5.2's MXFP4 checkpoint keeps its dense MLPs bf16: its MXFP4 experts run MXFP8
+# rows (native_fp4), which launch up to spec.NATIVE_FP4_ROWS rows
+NATIVE_FP4 = MXFP4 and "model.layers.0.mlp.down_proj" in _quant.get("exclude", [])
+MAX_ROWS = 8 if NATIVE_FP4 else 16
 # The normal path scores about 0.97 on GSM8K (thinking on); the bound is for gross
 # failures
 GSM8K_BOUND = 0.90
@@ -164,14 +168,16 @@ class TestMonokernelMtp(CustomTestCase):
 
 class TestMonokernelCheck(CustomTestCase):
     def test_each_covered_layer_within_its_numerics(self):
-        # 1, 3, 8 and 16 rows run at widths 2, 4, 8 and 16 (pad rows on the first
-        # two), and the long prompt's positions pass 2048, where the indexer selects
-        # keys
+        # 1, 3, 8, 12 and 16 rows run at widths 2, 4, 8, 12 and 16 (pad rows on the
+        # first two), and the long prompts' positions pass 2048, where the indexer
+        # selects keys: one request and decode steps of 12 and 16 (the CI recipe's
+        # rows past 8)
         self._check_layers(
             [],
-            ((1, 2), (3, 2), (8, 2), (16, 2), (1, 200)),
+            ((1, 2), (3, 2), (8, 2), (16, 2), (1, 200), (12, 200), (16, 200)),
             new_tokens=4,
-            rows=(1, 3, 8, 16),
+            rows=(1, 3, 8, 12, 16),
+            past_rows=(1, 12, 16),
         )
 
     def test_each_covered_verify_layer_within_its_numerics(self):
@@ -210,12 +216,17 @@ class TestMonokernelCheck(CustomTestCase):
             past=past,
         )
 
-    def _check_layers(self, extra_args, batches, new_tokens, rows, past=2048):
+    def _check_layers(
+        self, extra_args, batches, new_tokens, rows, past=2048, past_rows=()
+    ):
         """SGLANG_AMD_MONO_CHECK (eager) on one server, each (requests, repeats)
         batch of a record prompt in turn: both kinds of layer checked at every
-        count in ``rows``, an indexer layer past ``past`` keys, and no violation."""
+        count in ``rows`` the launches take, an indexer layer past ``past`` keys (at
+        each count in ``past_rows`` the launches take), and no violation."""
         from transformers import AutoTokenizer
 
+        rows = tuple(r for r in rows if r <= MAX_ROWS)
+        past_rows = tuple(r for r in past_rows if r <= MAX_ROWS)
         para = "The river valley archive lists the flood height of every year. "
         tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
         with (
@@ -286,6 +297,14 @@ class TestMonokernelCheck(CustomTestCase):
         self.assertTrue(
             any(k == "indexer" and int(hi) >= past for k, _, hi, _ in checks)
         )
+        for r in past_rows:
+            self.assertTrue(
+                any(
+                    k == "indexer" and int(n) == r and int(hi) >= past
+                    for k, n, hi, _ in checks
+                ),
+                f"no indexer check of {r} rows past {past} keys",
+            )
         if "--speculative-algorithm" in extra_args:
             # each MTP draft step on the NextN launches, checked against SGLang's
             drafts = re.findall(r"monokernel check draft (\d) \((index|shared),", log)
