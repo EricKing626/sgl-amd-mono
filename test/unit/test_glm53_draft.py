@@ -404,8 +404,9 @@ class _Runtime:
 
 
 # SGLang's widths for the draft: every multiple of the draft tokens up to 16 rows
-# (sglang/srt/kernel_plugins/amd/binding.py); the launches take any rows up to 8,
-# and past 8 the TP size's widths (12 and 16 at TP8, 12 at TP4)
+# (sglang/srt/kernel_plugins/amd/binding.py); the launches take any rows up to 4,
+# even rows up to 8, and past 8 the TP size's widths (12 and 16 at TP8, 12 at TP4).
+# No extend of 5 or 7 draft tokens runs a launch.
 BUILDS = [
     (8, 4, [4, 8, 12, 16]),
     (4, 4, [4, 8, 12]),
@@ -413,8 +414,12 @@ BUILDS = [
     (4, 3, [3, 6, 12]),
     (8, 2, [2, 4, 6, 8, 12, 16]),
     (4, 2, [2, 4, 6, 8, 12]),
-    (8, 5, [5]),
-    (4, 5, [5]),
+    (8, 5, []),
+    (4, 5, []),
+    (8, 6, [6, 12]),
+    (4, 6, [6, 12]),
+    (8, 7, []),
+    (4, 7, []),
 ]
 
 

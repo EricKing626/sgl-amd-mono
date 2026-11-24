@@ -564,11 +564,16 @@ def _build(model, hf_config, ctx):
     max_seq = -(-context_len // INDEX_KEYS_PER_TASK) * INDEX_KEYS_PER_TASK
     kv_fp8 = get_model().kv_cache_dtype == "fp8_e4m3"
     allowed = target.tp_widths(p.tp_size)
-    # SGLang routes every multiple of the draft tokens: a launch takes any rows up
-    # to 8, and past 8 only a width of this TP size (odd rows past 8 do not trace,
-    # and the kernel checks run 12 and 16); a draft extend runs at its own rows, so
-    # the other extends run SGLang's path
-    extend_widths = sorted(w for w in ctx.widths if w <= 8 or w in allowed)
+    # SGLang routes every multiple of the draft tokens. A launch takes any rows up
+    # to 4, even rows up to 8 (odd rows past 4 do not trace: the kernel asserts
+    # them), and past 8 only a width of this TP size (the kernel checks run 12 and
+    # 16). A
+    # draft extend runs at its own rows, so the other extends run SGLang's path.
+    # The target's native_fp4 cap does not apply: the NextN layer's experts are
+    # not native_fp4 (nextn below)
+    extend_widths = sorted(
+        w for w in ctx.widths if w <= 4 or (w <= 8 and w % 2 == 0) or w in allowed
+    )
     # a draft decode step of 5 to 8 rows runs SGLang's path: the NextN shared launch
     # at 8 rows faulted in a kernel check (a process of several launches, not alone)
     decode_widths = [w for w in allowed if w <= 4]

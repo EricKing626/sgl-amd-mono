@@ -306,6 +306,10 @@ def build_glm5_monokernel(
     attention_k_chunks_per_unit = 1 if attention_bf16 else 2
     SPLIT_KEYS = sparse_keys_per_task(S, heads)
     assert topk % SPLIT_KEYS == 0 and 1 <= S <= 16
+    # above 4 rows only even rows are built: the expert jobs' first weights go out
+    # under the activations' poll, which takes every row at once in pairs of rows
+    # (stage_xq), and 5 and 7 rows do not trace
+    assert S <= 4 or S % 2 == 0, f"{S} rows: above 4 rows a launch has even rows"
     assert 1 <= launches_per_step <= LAYER_SLOTS
     assert not with_indexer or (
         topk == 2048 and index_max_seq % INDEX_KEYS_PER_TASK == 0
