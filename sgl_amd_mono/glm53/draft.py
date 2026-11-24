@@ -567,10 +567,9 @@ def _build(model, hf_config, ctx):
     # SGLang routes every multiple of the draft tokens. A launch takes any rows up
     # to 4, even rows up to 8 (odd rows past 4 do not trace: the kernel asserts
     # them), and past 8 only a width of this TP size (the kernel checks run 12 and
-    # 16). A
-    # draft extend runs at its own rows, so the other extends run SGLang's path.
-    # The target's native_fp4 cap does not apply: the NextN layer's experts are
-    # not native_fp4 (nextn below)
+    # 16). A draft extend runs at its own rows, so the other extends run SGLang's
+    # path. The target's native_fp4 cap does not apply: the NextN layer's experts
+    # are not native_fp4 (nextn below)
     extend_widths = sorted(
         w for w in ctx.widths if w <= 4 or (w <= 8 and w % 2 == 0) or w in allowed
     )
