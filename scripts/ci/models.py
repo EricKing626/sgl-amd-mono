@@ -154,6 +154,9 @@ MODELS = {
     },
     "deepseek_v4": {
         "name": "DeepSeek-V4-Pro",
+        # Deprecated on InferenceX (DeepSeek-V4.1-Flash replaced it): not in the PR
+        # test, nor in the nightly. A dispatch with models=deepseek_v4 still runs it.
+        "pr": False,
         "packages": ["deepseek_v4"],
         "tp": 8,
         "paths": {"DEEPSEEK_V4_PRO_MODEL_PATH": f"{HF}/deepseek-ai/DeepSeek-V4-Pro"},
@@ -228,6 +231,11 @@ MODELS = {
     },
     "glm53_mxfp4": {
         "name": "GLM-5.3 (MXFP4)",
+        # Not in the PR test: its checkpoint is not on the CI nodes, so a PR job
+        # only re-ran the unit tests. Its MXFP4 kernel cases run under glm53. Set
+        # back to True once the checkpoint is staged; a dispatch with
+        # models=glm53_mxfp4 still runs it.
+        "pr": False,
         "packages": ["glm53"],
         "tp": 8,
         "paths": {"GLM_53_MODEL_PATH": f"{HF}/amd/GLM-5.3-Quark-MXFP4-AttnFP8"},
@@ -264,6 +272,9 @@ MODELS = {
     },
     "kimi_k3": {
         "name": "Kimi-K3",
+        # Deprecated on InferenceX (Kimi-K3.1-Pro replaced it): not in the PR test;
+        # the nightly still runs it, and a kimi_k3 package change runs kimi_k31.
+        "pr": False,
         # Phase 1 of the nightly
         "nightly": True,
         # set from the first weekly report
@@ -310,6 +321,9 @@ MODELS = {
     },
     "minimax_m3": {
         "name": "MiniMax-M3 (MXFP4)",
+        # Deprecated on InferenceX (MiniMax-M3.1-Flash replaced it): not in the PR
+        # test, nor in the nightly. A dispatch with models=minimax_m3 still runs it.
+        "pr": False,
         # SGLang refuses --enable-amd-monokernel for it until both merge
         "blocked": "needs SGLang's page16 SHUFFLE K/V (sgl-project/sglang#41998, #41708)",
         "packages": ["minimax_m3", "minimax"],
