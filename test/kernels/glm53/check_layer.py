@@ -632,6 +632,8 @@ def check_split(model: Model, rows: int, rank, tp, group, device, args) -> bool:
             d_got = got.float() - x.float()
             d_ref = ins[i + 1][sel].float() - x.float()
             rel = (d_got - d_ref).norm(dim=1) / d_ref.norm(dim=1).clamp_min(1e-30)
+            # max(0.0, nan) is 0.0, so a non-finite row would pass the bound
+            assert torch.isfinite(rel[live]).all(), f"launch {i}: {rel[live]}"
             worst = max(worst, float(rel[live].max()))
         for rt in sub.runtimes.values():
             rt.advance_step()
